@@ -3,11 +3,13 @@ import { useNavigate } from 'react-router-dom'
 import { extractConceptsFromPDF, startLearningChat, chatMessage, suggestConnections } from '../lib/gemini'
 import { addCard, getCards, addConnection } from '../lib/firebase'
 import ConceptEditor from '../components/ConceptEditor'
+import InsightToggle from '../components/InsightToggle'
+import TagInput from '../components/TagInput'
 import ChatBubble from '../components/ChatBubble'
 
 const MAX_TURNS = 5
 
-// step 머신: 'upload' → 'extracting' → 'extract' → 'insight' → 'chat' → 'connect' → (navigate)
+// step 머신: 'upload' → 'extracting' → 'extract' → 'chat' → 'connect'
 export default function UploadPage() {
   const navigate = useNavigate()
 
@@ -18,23 +20,25 @@ export default function UploadPage() {
   const [cardTitle, setCardTitle] = useState('')
   const [error, setError] = useState(null)
 
-  // Step 3 상태
-  const [myInsight, setMyInsight] = useState('')
+  // 인사이트 배열: [{concept_name, sub_concept_name, content, tags:[]}]
+  const [insights, setInsights] = useState([])
+
+  // 채팅 상태
   const [displayHistory, setDisplayHistory] = useState([])
   const [apiHistory, setApiHistory] = useState([])
-  const [directionButtons, setDirectionButtons] = useState([])
   const [turnCount, setTurnCount] = useState(0)
   const [isThinking, setIsThinking] = useState(false)
   const [userInput, setUserInput] = useState('')
   const [showTextInput, setShowTextInput] = useState(false)
 
-  // Step 4 상태
+  // 연결/저장 상태
+  const [cardTags, setCardTags] = useState([])
   const [isSaving, setIsSaving] = useState(false)
   const [savedCardId, setSavedCardId] = useState(null)
-  const [connectionSuggestions, setConnectionSuggestions] = useState([])  // [{card_id, reason, title}]
+  const [connectionSuggestions, setConnectionSuggestions] = useState([])
   const [selectedConnIds, setSelectedConnIds] = useState(new Set())
   const [isSavingConnections, setIsSavingConnections] = useState(false)
-  const [connectStep, setConnectStep] = useState('saving') // 'saving' | 'suggesting' | 'done'
+  const [connectStep, setConnectStep] = useState('saving')
 
   const fileInputRef = useRef(null)
   const chatBottomRef = useRef(null)
@@ -43,12 +47,33 @@ export default function UploadPage() {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [displayHistory, isThinking])
 
-  // step이 'connect'로 바뀌면 저장 + 연결 제안 트리거
   useEffect(() => {
     if (step === 'connect') handleSaveAndSuggest()
   }, [step])
 
-  // ── 파일 처리 ──────────────────────────────────────
+  // ── 인사이트 헬퍼 ──
+  function getInsightContent(conceptName, subConceptName) {
+    const found = insights.find(
+      (i) => i.concept_name === conceptName && i.sub_concept_name === subConceptName
+    )
+    return found?.content || ''
+  }
+
+  function setInsightContent(conceptName, subConceptName, content) {
+    setInsights((prev) => {
+      const idx = prev.findIndex(
+        (i) => i.concept_name === conceptName && i.sub_concept_name === subConceptName
+      )
+      if (idx >= 0) {
+        const next = [...prev]
+        next[idx] = { ...next[idx], content }
+        return next
+      }
+      return [...prev, { concept_name: conceptName, sub_concept_name: subConceptName, content, tags: [] }]
+    })
+  }
+
+  // ── 파일 처리 ──
   function handleFileSelect(selectedFile) {
     if (!selectedFile || selectedFile.type !== 'application/pdf') {
       setError('PDF 파일만 업로드할 수 있어요.')
@@ -80,32 +105,24 @@ export default function UploadPage() {
     handleFileSelect(e.dataTransfer.files[0])
   }
 
-  // ── Step 3: 인사이트 제출 ──────────────────────────
-  async function handleInsightSubmit() {
-    if (!myInsight.trim()) return
+  // ── 채팅 시작 ──
+  async function handleStartChat() {
     setStep('chat')
     setIsThinking(true)
     try {
-      const { text, buttons } = await startLearningChat(cardTitle, extractedConcepts, myInsight)
-      const systemUserMsg = buildSystemUserMessage(cardTitle, extractedConcepts, myInsight)
+      const { text } = await startLearningChat(cardTitle, extractedConcepts, insights)
       setApiHistory([
-        { role: 'user', content: systemUserMsg },
+        { role: 'user', content: buildSystemPrompt(cardTitle, extractedConcepts, insights) },
         { role: 'model', content: text },
       ])
       setDisplayHistory([{ role: 'model', content: text }])
-      setDirectionButtons(buttons)
+      setShowTextInput(true)
     } catch (e) {
       setDisplayHistory([{ role: 'model', content: '오류가 발생했어요. 다시 시도해주세요.' }])
+      setShowTextInput(true)
     } finally {
       setIsThinking(false)
     }
-  }
-
-  async function handleDirectionSelect(btn) {
-    if (btn === '지금 바로 저장') { setStep('connect'); return }
-    setDirectionButtons([])
-    setShowTextInput(true)
-    await sendUserMessage(btn)
   }
 
   async function handleSendMessage() {
@@ -127,7 +144,7 @@ export default function UploadPage() {
       setTurnCount(nextTurn)
       setDisplayHistory([...newDisplay, { role: 'model', content: reply }])
       setApiHistory([...newApi, { role: 'model', content: reply }])
-      if (nextTurn >= MAX_TURNS) { setShowTextInput(false); setDirectionButtons(['저장하기']) }
+      if (nextTurn >= MAX_TURNS) { setShowTextInput(false) }
     } catch (e) {
       setDisplayHistory([...newDisplay, { role: 'model', content: '오류가 발생했어요. 다시 시도해주세요.' }])
     } finally {
@@ -135,46 +152,40 @@ export default function UploadPage() {
     }
   }
 
-  // ── Step 4: 카드 저장 + 연결 제안 ──────────────────
+  // ── 카드 저장 + 연결 제안 ──
   async function handleSaveAndSuggest() {
     setIsSaving(true)
     setConnectStep('saving')
     try {
-      // 기존 카드 먼저 가져오기 (새 카드 저장 전)
       const existingCards = await getCards()
-
-      // 새 카드 저장
       const cardId = await addCard({
         title: cardTitle,
         source_file: file?.name || '',
         extracted_concepts: extractedConcepts,
-        my_insight: myInsight,
+        insights: insights.filter((i) => i.content?.trim()),
+        tags: cardTags,
+        my_insight: '',
         chat_history: displayHistory,
       })
       setSavedCardId(cardId)
       setIsSaving(false)
 
-      // 기존 카드가 없으면 바로 완료
-      if (existingCards.length === 0) {
-        setConnectStep('done')
-        return
-      }
+      if (existingCards.length === 0) { setConnectStep('done'); return }
 
-      // 연결 제안
       setConnectStep('suggesting')
-      const newCard = { title: cardTitle, extracted_concepts: extractedConcepts, my_insight: myInsight }
+      const newCard = {
+        title: cardTitle,
+        extracted_concepts: extractedConcepts,
+        insights: insights.filter((i) => i.content?.trim()),
+      }
       const suggestions = await suggestConnections(newCard, existingCards)
-
-      // card_id에 title 붙이기
       const suggestionsWithTitle = suggestions
         .map((s) => {
           const matched = existingCards.find((c) => c.id === s.card_id)
           return matched ? { ...s, title: matched.title } : null
         })
         .filter(Boolean)
-
       setConnectionSuggestions(suggestionsWithTitle)
-      // 기본적으로 전체 선택
       setSelectedConnIds(new Set(suggestionsWithTitle.map((s) => s.card_id)))
       setConnectStep('done')
     } catch (e) {
@@ -183,7 +194,6 @@ export default function UploadPage() {
     }
   }
 
-  // ── Step 4: 연결 저장 후 카드 페이지 이동 ──────────
   async function handleFinish() {
     if (!savedCardId) return
     setIsSavingConnections(true)
@@ -208,7 +218,7 @@ export default function UploadPage() {
     })
   }
 
-  // ── 렌더 ───────────────────────────────────────────
+  // ── 렌더 ──
   return (
     <div className="pt-20 pb-16 px-6 max-w-2xl mx-auto">
       {step === 'upload' && (
@@ -223,64 +233,59 @@ export default function UploadPage() {
         <ExtractView
           file={file} cardTitle={cardTitle} onCardTitleChange={setCardTitle}
           concepts={extractedConcepts} onConceptsChange={setExtractedConcepts}
-          onReset={() => { setStep('upload'); setFile(null) }}
-          onNext={() => setStep('insight')}
-        />
-      )}
-      {step === 'insight' && (
-        <InsightView
-          cardTitle={cardTitle} concepts={extractedConcepts}
-          insight={myInsight} onInsightChange={setMyInsight}
-          onBack={() => setStep('extract')} onSubmit={handleInsightSubmit}
+          insights={insights}
+          onInsightChange={setInsightContent}
+          getInsightContent={getInsightContent}
+          onReset={() => { setStep('upload'); setFile(null); setInsights([]) }}
+          onNext={handleStartChat}
         />
       )}
       {step === 'chat' && (
         <ChatView
           cardTitle={cardTitle} displayHistory={displayHistory} isThinking={isThinking}
-          directionButtons={directionButtons} showTextInput={showTextInput}
-          userInput={userInput} turnCount={turnCount} maxTurns={MAX_TURNS}
-          chatBottomRef={chatBottomRef} onDirectionSelect={handleDirectionSelect}
+          showTextInput={showTextInput} userInput={userInput}
+          turnCount={turnCount} maxTurns={MAX_TURNS}
+          chatBottomRef={chatBottomRef}
           onUserInputChange={setUserInput} onSendMessage={handleSendMessage}
           onSave={() => setStep('connect')}
         />
       )}
       {step === 'connect' && (
         <ConnectView
-          cardTitle={cardTitle}
-          connectStep={connectStep}
-          isSaving={isSaving}
-          suggestions={connectionSuggestions}
-          selectedConnIds={selectedConnIds}
-          isSavingConnections={isSavingConnections}
-          onToggle={toggleConnId}
-          onFinish={handleFinish}
+          cardTitle={cardTitle} connectStep={connectStep} isSaving={isSaving}
+          suggestions={connectionSuggestions} selectedConnIds={selectedConnIds}
+          isSavingConnections={isSavingConnections} cardTags={cardTags}
+          onTagsChange={setCardTags} onToggle={toggleConnId} onFinish={handleFinish}
         />
       )}
     </div>
   )
 }
 
-// ── 서브 뷰 컴포넌트 ──────────────────────────────────
+// ── 서브 뷰 컴포넌트 ──
 
 function UploadZone({ isDragging, error, fileInputRef, onDragOver, onDragLeave, onDrop, onFileChange }) {
   return (
     <div>
       <div className="mb-8">
-        <h1 className="text-2xl font-bold text-white">새 카드 만들기</h1>
-        <p className="text-slate-400 mt-1 text-sm">PDF를 올리면 핵심 개념을 자동으로 뽑아드려요.</p>
+        <h1 className="text-2xl font-bold text-slate-900">새 카드 만들기</h1>
+        <p className="text-slate-500 mt-1 text-sm">PDF를 올리면 핵심 개념을 자동으로 뽑아드려요.</p>
       </div>
       <div
         onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}
         onClick={() => fileInputRef.current?.click()}
         className={`border-2 border-dashed rounded-xl p-16 text-center cursor-pointer transition-colors
-          ${isDragging ? 'border-indigo-400 bg-indigo-950/30' : 'border-slate-700 hover:border-slate-500 bg-slate-900/50'}`}
+          ${isDragging
+            ? 'border-indigo-400 bg-indigo-50'
+            : 'border-slate-200 hover:border-slate-300 bg-slate-50 hover:bg-white'
+          }`}
       >
         <div className="text-4xl mb-4">📄</div>
-        <p className="text-white font-medium">PDF를 여기에 드래그하거나 클릭해서 선택</p>
-        <p className="text-slate-500 text-sm mt-2">논문, 강의 자료 등 모든 PDF 가능</p>
+        <p className="text-slate-800 font-medium">PDF를 여기에 드래그하거나 클릭해서 선택</p>
+        <p className="text-slate-400 text-sm mt-2">논문, 강의 자료 등 모든 PDF 가능</p>
         <input ref={fileInputRef} type="file" accept=".pdf,application/pdf" className="hidden" onChange={onFileChange} />
       </div>
-      {error && <p className="mt-4 text-red-400 text-sm text-center">{error}</p>}
+      {error && <p className="mt-4 text-red-500 text-sm text-center">{error}</p>}
     </div>
   )
 }
@@ -288,69 +293,119 @@ function UploadZone({ isDragging, error, fileInputRef, onDragOver, onDragLeave, 
 function ExtractingView({ fileName }) {
   return (
     <div className="flex flex-col items-center justify-center py-24 text-center">
-      <div className="w-10 h-10 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin mb-6" />
-      <p className="text-white font-medium">개념을 추출하는 중...</p>
-      <p className="text-slate-500 text-sm mt-2">{fileName}</p>
+      <div className="w-10 h-10 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mb-6" />
+      <p className="text-slate-800 font-medium">개념을 추출하는 중...</p>
+      <p className="text-slate-400 text-sm mt-2">{fileName}</p>
     </div>
   )
 }
 
-function ExtractView({ file, cardTitle, onCardTitleChange, concepts, onConceptsChange, onReset, onNext }) {
+function ExtractView({
+  file, cardTitle, onCardTitleChange,
+  concepts, onConceptsChange,
+  insights, onInsightChange, getInsightContent,
+  onReset, onNext,
+}) {
+  const [showEditor, setShowEditor] = useState(false)
+  const hasAnyInsight = insights.some((i) => i.content?.trim())
+  const totalSubConcepts = concepts.reduce((acc, c) => acc + (c.sub_concepts?.length || 0), 0)
+
   return (
     <div>
       <div className="mb-6">
-        <button onClick={onReset} className="text-slate-500 hover:text-slate-300 text-sm mb-4">← 다시 업로드</button>
-        <h1 className="text-2xl font-bold text-white">추출된 개념 확인</h1>
-        <p className="text-slate-400 text-sm mt-1">
-          <span className="text-indigo-400">{file?.name}</span>에서 {concepts.length}개 개념을 찾았어요.
+        <button onClick={onReset} className="text-slate-400 hover:text-slate-700 text-sm mb-4 transition-colors">
+          ← 다시 업로드
+        </button>
+        <h1 className="text-2xl font-bold text-slate-900">추출된 개념 확인</h1>
+        <p className="text-slate-500 text-sm mt-1">
+          <span className="text-indigo-600 font-medium">{file?.name}</span>에서{' '}
+          {concepts.length}개 상위 개념, {totalSubConcepts}개 하위 개념을 찾았어요.
         </p>
       </div>
+
+      {/* 카드 제목 */}
       <div className="mb-6">
-        <label className="block text-xs text-slate-500 font-medium mb-1.5">카드 제목</label>
+        <label className="block text-xs text-slate-500 font-semibold uppercase tracking-wider mb-1.5">카드 제목</label>
         <input
-          className="w-full bg-slate-800 border border-slate-700 text-white rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          value={cardTitle} onChange={(e) => onCardTitleChange(e.target.value)} placeholder="카드 제목"
+          className="w-full bg-white border border-slate-200 text-slate-900 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400 placeholder:text-slate-400"
+          value={cardTitle}
+          onChange={(e) => onCardTitleChange(e.target.value)}
+          placeholder="카드 제목"
         />
       </div>
-      <div className="mb-8">
-        <label className="block text-xs text-slate-500 font-medium mb-3">핵심 개념 ({concepts.length}개)</label>
-        <ConceptEditor concepts={concepts} onChange={onConceptsChange} />
-      </div>
-      <button
-        onClick={onNext} disabled={concepts.length === 0 || !cardTitle.trim()}
-        className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium py-3 rounded-xl transition-colors"
-      >
-        다음 — 내 인사이트 입력 →
-      </button>
-    </div>
-  )
-}
 
-function InsightView({ cardTitle, concepts, insight, onInsightChange, onBack, onSubmit }) {
-  return (
-    <div>
-      <button onClick={onBack} className="text-slate-500 hover:text-slate-300 text-sm mb-6">← 개념 편집으로</button>
-      <h1 className="text-2xl font-bold text-white mb-1">내 인사이트</h1>
-      <p className="text-slate-400 text-sm mb-6">
-        <span className="text-indigo-400 font-medium">{cardTitle}</span>에서 왜 이 개념이 대박이었나요?
-      </p>
-      <div className="flex flex-wrap gap-2 mb-6">
-        {concepts.map((c, i) => (
-          <span key={i} className="text-xs bg-slate-800 text-slate-400 border border-slate-700 rounded-full px-3 py-1">
-            {c.name}
-          </span>
-        ))}
+      {/* 개념 + 인사이트 토글 */}
+      <div className="mb-4">
+        <div className="flex items-center justify-between mb-3">
+          <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider">
+            핵심 개념 ({concepts.length}개)
+          </label>
+          <button
+            onClick={() => setShowEditor((v) => !v)}
+            className="text-xs text-slate-400 hover:text-indigo-600 transition-colors"
+          >
+            {showEditor ? '편집 닫기' : '편집'}
+          </button>
+        </div>
+
+        {showEditor ? (
+          <ConceptEditor concepts={concepts} onChange={onConceptsChange} />
+        ) : (
+          <div className="space-y-3">
+            {concepts.map((concept, i) => (
+              <div key={i} className="border border-slate-200 rounded-xl overflow-hidden">
+                {/* 상위 개념 헤더 */}
+                <div className="px-4 py-2.5 bg-white">
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-sm font-semibold text-slate-800">{concept.name}</span>
+                    {concept.description && (
+                      <span className="text-xs text-slate-400">{concept.description}</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* 하위 개념 + InsightToggle */}
+                {concept.sub_concepts?.length > 0 && (
+                  <div className="border-t border-slate-100 bg-slate-50 divide-y divide-slate-100">
+                    {concept.sub_concepts.map((sub, j) => (
+                      <div key={j} className="px-4 py-2">
+                        <div className="flex items-baseline gap-1.5 mb-0.5">
+                          <span className="text-slate-400 text-[10px]">└</span>
+                          <span className="text-xs font-medium text-slate-700">{sub.name}</span>
+                          {sub.description && (
+                            <span className="text-[11px] text-slate-400">{sub.description}</span>
+                          )}
+                        </div>
+                        <div className="pl-3">
+                          <InsightToggle
+                            conceptName={concept.name}
+                            subConceptName={sub.name}
+                            value={getInsightContent(concept.name, sub.name)}
+                            onChange={(val) => onInsightChange(concept.name, sub.name, val)}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
-      <textarea
-        className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-4 py-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500 placeholder:text-slate-500 min-h-[120px]"
-        placeholder="예: attention이 결국 context를 동적으로 재구성한다는 게 신선했다. 정적인 임베딩의 한계를 이게 뚫어주는 느낌."
-        value={insight} onChange={(e) => onInsightChange(e.target.value)}
-      />
+
+      {hasAnyInsight && (
+        <p className="text-xs text-indigo-500 mb-4">
+          💡 인사이트가 입력됐어요. AI와 대화에서 이 내용을 바탕으로 시작할게요.
+        </p>
+      )}
+
       <button
-        onClick={onSubmit} disabled={!insight.trim()}
-        className="mt-4 w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium py-3 rounded-xl transition-colors"
+        onClick={onNext}
+        disabled={concepts.length === 0 || !cardTitle.trim()}
+        className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium py-3 rounded-xl transition-colors"
       >
-        AI와 대화 시작 →
+        {hasAnyInsight ? 'AI와 대화 시작 →' : '인사이트 없이 대화 시작 →'}
       </button>
     </div>
   )
@@ -358,16 +413,15 @@ function InsightView({ cardTitle, concepts, insight, onInsightChange, onBack, on
 
 function ChatView({
   cardTitle, displayHistory, isThinking,
-  directionButtons, showTextInput, userInput,
-  turnCount, maxTurns, chatBottomRef,
-  onDirectionSelect, onUserInputChange, onSendMessage, onSave,
+  showTextInput, userInput, turnCount, maxTurns, chatBottomRef,
+  onUserInputChange, onSendMessage, onSave,
 }) {
   return (
     <div className="flex flex-col" style={{ minHeight: 'calc(100vh - 5rem)' }}>
-      <div className="mb-4 pb-4 border-b border-slate-800">
-        <p className="text-xs text-slate-500 font-medium">학습 대화</p>
-        <p className="text-white font-semibold">{cardTitle}</p>
-        <p className="text-xs text-slate-600 mt-0.5">{turnCount}/{maxTurns}턴</p>
+      <div className="mb-4 pb-4 border-b border-slate-200">
+        <p className="text-xs text-slate-400 font-medium">대화 내용</p>
+        <p className="text-slate-900 font-semibold">{cardTitle}</p>
+        <p className="text-xs text-slate-400 mt-0.5">{turnCount}/{maxTurns}턴</p>
       </div>
       <div className="flex-1 space-y-4 mb-4">
         {displayHistory.map((msg, i) => (
@@ -375,7 +429,7 @@ function ChatView({
         ))}
         {isThinking && (
           <div className="flex justify-start">
-            <div className="bg-slate-800 border border-slate-700 rounded-2xl rounded-bl-sm px-4 py-3">
+            <div className="bg-slate-100 border border-slate-200 rounded-2xl rounded-bl-sm px-4 py-3">
               <div className="flex gap-1 items-center">
                 <div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
                 <div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
@@ -386,45 +440,30 @@ function ChatView({
         )}
         <div ref={chatBottomRef} />
       </div>
-      {directionButtons.length > 0 && !isThinking && (
-        <div className="flex flex-col gap-2 mb-4">
-          {directionButtons.map((btn) => (
-            <button
-              key={btn} onClick={() => onDirectionSelect(btn)}
-              className={`text-sm py-2.5 px-4 rounded-xl border transition-colors text-left
-                ${btn === '지금 바로 저장'
-                  ? 'border-slate-700 text-slate-400 hover:border-slate-500 hover:text-white'
-                  : 'border-indigo-700 bg-indigo-950/50 text-indigo-300 hover:bg-indigo-900/50'
-                }`}
-            >
-              {btn === '지금 바로 저장' ? '💾 지금 바로 저장' : `→ ${btn}`}
-            </button>
-          ))}
-        </div>
-      )}
-      {showTextInput && !isThinking && directionButtons.length === 0 && (
+
+      {showTextInput && !isThinking && (
         <div className="flex gap-2">
           <input
-            className="flex-1 bg-slate-800 border border-slate-700 text-white rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 placeholder:text-slate-500"
+            className="flex-1 bg-white border border-slate-200 text-slate-900 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-400 placeholder:text-slate-400"
             placeholder="계속 대화하기..."
             value={userInput} onChange={(e) => onUserInputChange(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && onSendMessage()}
           />
           <button
             onClick={onSendMessage} disabled={!userInput.trim()}
-            className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white px-4 rounded-xl transition-colors text-sm"
+            className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white px-4 rounded-xl transition-colors text-sm"
           >
             전송
           </button>
         </div>
       )}
-      {directionButtons.includes('저장하기') && (
-        <button onClick={onSave} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-3 rounded-xl transition-colors">
+      {turnCount >= maxTurns && !showTextInput && (
+        <button onClick={onSave} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 rounded-xl transition-colors">
           저장하기 →
         </button>
       )}
-      {showTextInput && !directionButtons.includes('저장하기') && (
-        <button onClick={onSave} className="mt-2 w-full text-slate-500 hover:text-white text-sm py-2 border border-slate-800 hover:border-slate-600 rounded-xl transition-colors">
+      {showTextInput && (
+        <button onClick={onSave} className="mt-2 w-full text-slate-400 hover:text-slate-700 text-sm py-2 border border-slate-200 hover:border-slate-300 rounded-xl transition-colors bg-white">
           지금 저장하기
         </button>
       )}
@@ -432,18 +471,20 @@ function ChatView({
   )
 }
 
-function ConnectView({ cardTitle, connectStep, isSaving, suggestions, selectedConnIds, isSavingConnections, onToggle, onFinish }) {
-  // 로딩 중
+function ConnectView({
+  cardTitle, connectStep, isSaving, suggestions, selectedConnIds,
+  isSavingConnections, cardTags, onTagsChange, onToggle, onFinish,
+}) {
   if (connectStep === 'saving' || connectStep === 'suggesting') {
     return (
       <div className="flex flex-col items-center justify-center py-24 text-center">
-        <div className="w-10 h-10 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin mb-6" />
-        <p className="text-white font-medium">
+        <div className="w-10 h-10 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mb-6" />
+        <p className="text-slate-800 font-medium">
           {connectStep === 'saving' ? '카드를 저장하는 중...' : '연결을 찾는 중...'}
         </p>
-        <p className="text-slate-500 text-sm mt-2">
-          {connectStep === 'suggesting' ? '기존 카드들과 의미 있는 연결을 탐색해요.' : ''}
-        </p>
+        {connectStep === 'suggesting' && (
+          <p className="text-slate-400 text-sm mt-2">기존 카드들과 의미 있는 연결을 탐색해요.</p>
+        )}
       </div>
     )
   }
@@ -453,37 +494,44 @@ function ConnectView({ cardTitle, connectStep, isSaving, suggestions, selectedCo
       {/* 저장 완료 */}
       <div className="mb-8">
         <div className="flex items-center gap-3 mb-2">
-          <div className="w-8 h-8 bg-green-500/20 rounded-full flex items-center justify-center text-green-400 text-sm">✓</div>
-          <h1 className="text-2xl font-bold text-white">저장 완료!</h1>
+          <div className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center text-green-600 text-sm">✓</div>
+          <h1 className="text-2xl font-bold text-slate-900">저장 완료!</h1>
         </div>
-        <p className="text-slate-400 text-sm">
-          <span className="text-indigo-400 font-medium">{cardTitle}</span> 카드가 저장됐어요.
+        <p className="text-slate-500 text-sm">
+          <span className="text-indigo-600 font-medium">{cardTitle}</span> 카드가 저장됐어요.
         </p>
+      </div>
+
+      {/* 카드 태그 */}
+      <div className="mb-8">
+        <label className="block text-xs text-slate-500 font-semibold uppercase tracking-wider mb-2">태그</label>
+        <TagInput tags={cardTags} onChange={onTagsChange} placeholder="태그 추가 (Enter 또는 ,)" />
+        <p className="text-xs text-slate-400 mt-1.5">이 카드를 나중에 찾을 때 쓸 태그를 달아보세요.</p>
       </div>
 
       {/* 연결 제안 */}
       {suggestions.length > 0 ? (
         <div className="mb-8">
-          <p className="text-sm font-medium text-white mb-1">연결 제안</p>
-          <p className="text-xs text-slate-500 mb-4">AI가 기존 카드와의 연결을 찾았어요. 저장할 연결을 선택하세요.</p>
-          <div className="space-y-3">
+          <p className="text-sm font-semibold text-slate-800 mb-1">연결 제안</p>
+          <p className="text-xs text-slate-400 mb-4">AI가 기존 카드와의 연결을 찾았어요. 저장할 연결을 선택하세요.</p>
+          <div className="space-y-2">
             {suggestions.map((s) => (
               <label
                 key={s.card_id}
                 className={`flex items-start gap-3 p-4 rounded-xl border cursor-pointer transition-colors
                   ${selectedConnIds.has(s.card_id)
-                    ? 'border-indigo-600 bg-indigo-950/40'
-                    : 'border-slate-700 bg-slate-800/50 hover:border-slate-600'
+                    ? 'border-indigo-300 bg-indigo-50'
+                    : 'border-slate-200 bg-white hover:border-slate-300'
                   }`}
               >
                 <input
                   type="checkbox"
-                  className="mt-0.5 accent-indigo-500 shrink-0"
+                  className="mt-0.5 accent-indigo-600 shrink-0"
                   checked={selectedConnIds.has(s.card_id)}
                   onChange={() => onToggle(s.card_id)}
                 />
                 <div className="min-w-0">
-                  <p className="text-sm font-medium text-white">{s.title}</p>
+                  <p className="text-sm font-medium text-slate-800">{s.title}</p>
                   <p className="text-xs text-slate-400 mt-0.5">{s.reason}</p>
                 </div>
               </label>
@@ -491,32 +539,48 @@ function ConnectView({ cardTitle, connectStep, isSaving, suggestions, selectedCo
           </div>
         </div>
       ) : (
-        <div className="mb-8 p-4 bg-slate-800/50 rounded-xl border border-slate-700 text-center">
-          <p className="text-slate-400 text-sm">연결할 기존 카드가 없어요.</p>
-          <p className="text-slate-500 text-xs mt-1">카드가 더 쌓이면 자동으로 연결이 생겨요.</p>
+        <div className="mb-8 p-4 bg-slate-50 rounded-xl border border-slate-200 text-center">
+          <p className="text-slate-500 text-sm">연결할 기존 카드가 없어요.</p>
+          <p className="text-slate-400 text-xs mt-1">카드가 더 쌓이면 자동으로 연결이 생겨요.</p>
         </div>
       )}
 
       <button
         onClick={onFinish}
         disabled={isSavingConnections}
-        className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white font-medium py-3 rounded-xl transition-colors"
+        className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-medium py-3 rounded-xl transition-colors"
       >
-        {isSavingConnections ? '저장 중...' : `완료 — 카드 보기 →`}
+        {isSavingConnections ? '저장 중...' : '완료 — 카드 보기 →'}
       </button>
     </div>
   )
 }
 
-// ── 헬퍼 ─────────────────────────────────────────────
+// ── 헬퍼 ──
 
-function buildSystemUserMessage(cardTitle, concepts, insight) {
+function buildSystemPrompt(cardTitle, concepts, insights) {
+  const conceptNames = concepts.flatMap((c) => [
+    c.name,
+    ...(c.sub_concepts || []).map((s) => s.name),
+  ]).join(', ')
+
+  const insightLines = insights
+    .filter((i) => i.content?.trim())
+    .map((i) => `- ${i.sub_concept_name || i.concept_name}: "${i.content}"`)
+    .join('\n')
+
   return `너는 학습 코치야. 사용자가 공부한 개념에 대해 짧고 날카로운 대화로 이해를 깊게 해줘.
 
 사용자가 공부한 내용:
 - 주제: ${cardTitle}
-- 핵심 개념: ${concepts.map((c) => c.name).join(', ')}
-- 사용자의 인사이트: "${insight}"`
+- 핵심 개념: ${conceptNames}
+- 사용자의 인사이트:
+${insightLines || '없음'}
+
+규칙:
+- 각 응답은 2~3문장으로 간결하게
+- 마지막 문장은 반드시 사용자의 생각을 묻는 질문으로 끝내
+- JSON, 버튼, 목록 형식은 절대 사용하지 마`
 }
 
 function fileToBase64(file) {

@@ -2,8 +2,8 @@ import { NavLink } from 'react-router-dom'
 
 export default function Navbar() {
   return (
-    <nav className="fixed top-0 left-0 right-0 z-50 bg-slate-900 border-b border-slate-700 h-14 flex items-center px-6">
-      <NavLink to="/" className="text-white font-bold text-lg tracking-tight mr-8">
+    <nav className="fixed top-0 left-0 right-0 z-50 bg-white border-b border-slate-200 h-14 flex items-center px-6">
+      <NavLink to="/" className="text-slate-900 font-bold text-lg tracking-tight mr-8">
         LEXI
       </NavLink>
       <div className="flex gap-6">
@@ -12,7 +12,7 @@ export default function Navbar() {
           end
           className={({ isActive }) =>
             `text-sm font-medium transition-colors ${
-              isActive ? 'text-indigo-400' : 'text-slate-400 hover:text-white'
+              isActive ? 'text-indigo-600' : 'text-slate-500 hover:text-slate-900'
             }`
           }
         >
@@ -22,7 +22,7 @@ export default function Navbar() {
           to="/graph"
           className={({ isActive }) =>
             `text-sm font-medium transition-colors ${
-              isActive ? 'text-indigo-400' : 'text-slate-400 hover:text-white'
+              isActive ? 'text-indigo-600' : 'text-slate-500 hover:text-slate-900'
             }`
           }
         >

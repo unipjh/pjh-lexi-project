@@ -1,5 +1,24 @@
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${import.meta.env.VITE_GEMINI_API_KEY}`
 
+// ── 내부 헬퍼 ──────────────────────────────────────────
+
+// 개념 배열에서 모든 개념 이름 추출 (상위 + 하위 포함)
+function flattenConceptNames(concepts) {
+  return (concepts || []).flatMap((c) => [
+    c.name,
+    ...((c.sub_concepts || []).map((s) => s.name)),
+  ]).join(', ')
+}
+
+// 인사이트 배열을 텍스트로 변환
+function formatInsights(insights) {
+  if (!insights || insights.length === 0) return '없음'
+  const lines = insights
+    .filter((i) => i.content?.trim())
+    .map((i) => `- ${i.sub_concept_name || i.concept_name}: "${i.content}"`)
+  return lines.length > 0 ? lines.join('\n') : '없음'
+}
+
 async function callGemini(contents) {
   const response = await fetch(GEMINI_API_URL, {
     method: 'POST',
@@ -14,18 +33,27 @@ async function callGemini(contents) {
   return data.candidates[0].content.parts[0].text
 }
 
-// PDF에서 핵심 개념 추출
+// PDF에서 핵심 개념 계층적 추출
 // base64Data: FileReader로 읽은 base64 문자열 (data: URI 제외한 순수 base64)
 export async function extractConceptsFromPDF(base64Data, mimeType = 'application/pdf') {
-  const prompt = `이 PDF 문서에서 핵심 개념들을 추출해줘.
+  const prompt = `이 PDF 문서의 핵심 개념을 계층적으로 추출해줘.
 반드시 아래 JSON 형식으로만 응답해. 다른 텍스트는 절대 포함하지 마.
 
 [
-  { "name": "개념명", "description": "한 줄 설명 (50자 이내)" },
-  ...
+  {
+    "name": "상위 개념",
+    "description": "한 줄 설명 (50자 이내)",
+    "sub_concepts": [
+      { "name": "하위 개념", "description": "한 줄 설명 (40자 이내)" }
+    ]
+  }
 ]
 
-개념은 최대 10개까지만 추출해.`
+규칙:
+- 상위 개념: 최대 15개. PDF의 대주제/챕터/핵심 섹션 단위로 추출.
+- 하위 개념: 상위 개념당 2~6개. 구체적 용어, 기법, 세부 개념을 불릿 형태로.
+- 결과 전체가 PDF의 '키워드 요약본'처럼 보여야 함.
+- 중복 없이, 실제 문서에 등장하는 내용만 추출.`
 
   const contents = [
     {
@@ -53,34 +81,31 @@ export async function chatMessage(messages) {
   return await callGemini(contents)
 }
 
-// 첫 학습 대화 시작 — 인사이트를 받아 방향 제안
-export async function startLearningChat(cardTitle, concepts, insight) {
-  const conceptNames = concepts.map((c) => c.name).join(', ')
+// 첫 학습 대화 시작 — insights 배열을 받아 대화 시작
+// insights: [{concept_name, sub_concept_name, content, tags:[]}]
+export async function startLearningChat(cardTitle, concepts, insights) {
+  const conceptNames = flattenConceptNames(concepts)
+  const insightText = formatInsights(insights)
+
   const systemPrompt = `너는 학습 코치야. 사용자가 공부한 개념에 대해 짧고 날카로운 대화로 이해를 깊게 해줘.
 
 사용자가 공부한 내용:
 - 주제: ${cardTitle}
 - 핵심 개념: ${conceptNames}
-- 사용자의 인사이트: "${insight}"
+- 사용자의 인사이트:
+${insightText}
 
-위 인사이트를 읽고, 다음 중 가장 적합한 방향 하나를 골라서 짧게 응답해줘.
-응답은 2~3문장으로 간결하게. 그리고 마지막에 사용자가 선택할 수 있는 방향 버튼 3개를 JSON으로 제시해.
+위 내용을 읽고, 가장 흥미로운 포인트를 짚어서 짧게 응답해줘.
 
-형식:
-[응답 텍스트]
-
-BUTTONS:["더 깊이 파고들기", "다른 개념과 연결해보기", "지금 바로 저장"]`
+규칙:
+- 2~3문장으로 간결하게
+- 마지막 문장은 반드시 사용자의 생각을 묻는 질문으로 끝내
+- JSON, 버튼, 목록 형식 없이 자연스러운 대화체로만`
 
   const messages = [{ role: 'user', content: systemPrompt }]
-  const raw = await chatMessage(messages)
+  const text = await chatMessage(messages)
 
-  const buttonMatch = raw.match(/BUTTONS:\[([^\]]+)\]/)
-  const buttons = buttonMatch
-    ? JSON.parse(`[${buttonMatch[1]}]`)
-    : ['더 깊이 파고들기', '다른 개념과 연결해보기', '지금 바로 저장']
-  const text = raw.replace(/BUTTONS:\[([^\]]+)\]/, '').trim()
-
-  return { text, buttons }
+  return { text: text.trim() }
 }
 
 // 기존 카드들과의 연결 제안
@@ -88,15 +113,19 @@ export async function suggestConnections(newCard, existingCards) {
   if (existingCards.length === 0) return []
 
   const existingCardsSummary = existingCards
-    .map((c) => `- ID: ${c.id}, 제목: ${c.title}, 인사이트: "${c.my_insight || ''}"`)
+    .map((c) => {
+      const conceptNames = flattenConceptNames(c.extracted_concepts)
+      const insightText = c.my_insight || formatInsights(c.insights)
+      return `- ID: ${c.id}, 제목: ${c.title}, 개념: ${conceptNames}, 인사이트: "${insightText}"`
+    })
     .join('\n')
 
   const prompt = `새로운 개념 카드와 기존 카드들 사이의 의미있는 연결을 찾아줘.
 
 새 카드:
 - 제목: ${newCard.title}
-- 핵심 개념: ${(newCard.extracted_concepts || []).map((c) => c.name).join(', ')}
-- 인사이트: "${newCard.my_insight || ''}"
+- 핵심 개념: ${flattenConceptNames(newCard.extracted_concepts)}
+- 인사이트: "${formatInsights(newCard.insights) || newCard.my_insight || ''}"
 
 기존 카드 목록:
 ${existingCardsSummary}

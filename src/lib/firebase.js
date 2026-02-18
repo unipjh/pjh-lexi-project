@@ -9,6 +9,7 @@ import {
   query,
   where,
   deleteDoc,
+  updateDoc,
   serverTimestamp,
   orderBy,
 } from 'firebase/firestore'
@@ -46,6 +47,11 @@ export async function getCard(id) {
   const snapshot = await getDoc(docRef)
   if (!snapshot.exists()) return null
   return { id: snapshot.id, ...snapshot.data() }
+}
+
+export async function updateCard(id, data) {
+  const docRef = doc(db, 'cards', id)
+  await updateDoc(docRef, data)
 }
 
 export async function deleteCard(id) {
