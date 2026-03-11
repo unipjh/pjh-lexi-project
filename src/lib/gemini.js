@@ -43,8 +43,13 @@ export async function extractConceptsFromPDF(base64Data, mimeType = 'application
   {
     "name": "상위 개념",
     "description": "한 줄 설명 (50자 이내)",
+    "source_text": "PDF 원문에서 그대로 발췌한 텍스트",
     "sub_concepts": [
-      { "name": "하위 개념", "description": "한 줄 설명 (40자 이내)" }
+      {
+        "name": "하위 개념",
+        "description": "한 줄 설명 (40자 이내)",
+        "source_text": "PDF 원문 발췌"
+      }
     ]
   }
 ]
@@ -53,7 +58,11 @@ export async function extractConceptsFromPDF(base64Data, mimeType = 'application
 - 상위 개념: 최대 15개. PDF의 대주제/챕터/핵심 섹션 단위로 추출.
 - 하위 개념: 상위 개념당 2~6개. 구체적 용어, 기법, 세부 개념을 불릿 형태로.
 - 결과 전체가 PDF의 '키워드 요약본'처럼 보여야 함.
-- 중복 없이, 실제 문서에 등장하는 내용만 추출.`
+- 중복 없이, 실제 문서에 등장하는 내용만 추출.
+- source_text는 해당 개념이 정의되거나 설명되는 문장을 PDF 원문에서 그대로 발췌.
+- 단어 하나나 제목만 쓰지 말고, 맥락이 담긴 구 또는 문장으로 발췌 (15자 이상 권장).
+- 요약/변형/번역 금지 — 원문 그대로.
+- 원문에서 찾을 수 없으면 source_text는 빈 문자열로 반환.`
 
   const contents = [
     {

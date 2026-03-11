@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
-import { getCard, getConnections, getCard as getCardById, updateCard, deleteCard } from '../lib/firebase'
+import { getCard, getConnections, getCard as getCardById, updateCard, deleteCard, deleteConnection } from '../lib/firebase'
 import ChatBubble from '../components/ChatBubble'
 import TagInput from '../components/TagInput'
+import ConceptEditor from '../components/ConceptEditor'
 
 export default function CardPage() {
   const { id } = useParams()
@@ -20,6 +21,13 @@ export default function CardPage() {
 
   // 태그 편집
   const [tags, setTags] = useState([])
+
+  // 인사이트 인라인 편집
+  const [editingInsightKey, setEditingInsightKey] = useState(null) // 'conceptName::subConceptName'
+  const [editingInsightValue, setEditingInsightValue] = useState('')
+
+  // 추출된 개념 편집 모달
+  const [showConceptEditor, setShowConceptEditor] = useState(false)
 
   // 삭제
   const [deleteConfirm, setDeleteConfirm] = useState(false)
@@ -41,7 +49,7 @@ export default function CardPage() {
         connections.map(async (conn) => {
           const otherId = conn.card_id_a === id ? conn.card_id_b : conn.card_id_a
           const other = await getCardById(otherId)
-          return other ? { id: otherId, title: other.title, reason: conn.reason } : null
+          return other ? { connId: conn.id, id: otherId, title: other.title, reason: conn.reason } : null
         })
       )
       setConnectedCards(connectedList.filter(Boolean))
@@ -71,6 +79,30 @@ export default function CardPage() {
     } catch {
       // silent fail — UI 이미 낙관적으로 업데이트됨
     }
+  }
+
+  async function handleSaveInsight(conceptName, subConceptName, newContent) {
+    const prev = card.insights || []
+    const idx = prev.findIndex(
+      (ins) => ins.concept_name === conceptName && ins.sub_concept_name === subConceptName
+    )
+    const updatedInsights = idx >= 0
+      ? prev.map((ins, i) => i === idx ? { ...ins, content: newContent } : ins)
+      : [...prev, { concept_name: conceptName, sub_concept_name: subConceptName, content: newContent, tags: [] }]
+    await updateCard(id, { insights: updatedInsights })
+    setCard((prev) => ({ ...prev, insights: updatedInsights }))
+    setEditingInsightKey(null)
+  }
+
+  async function handleSaveConcepts(newConcepts) {
+    await updateCard(id, { extracted_concepts: newConcepts })
+    setCard((prev) => ({ ...prev, extracted_concepts: newConcepts }))
+    setShowConceptEditor(false)
+  }
+
+  async function handleDeleteConnection(connId) {
+    await deleteConnection(connId)
+    setConnectedCards((prev) => prev.filter((c) => c.connId !== connId))
   }
 
   async function handleDelete() {
@@ -178,7 +210,15 @@ export default function CardPage() {
         {/* 정리 (계층 개념 + 인사이트) */}
         {concepts.length > 0 && (
           <div className="bg-white border border-slate-200 rounded-xl p-5">
-            <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-4">정리</h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">정리</h2>
+              <button
+                onClick={() => setShowConceptEditor(true)}
+                className="text-xs text-slate-400 hover:text-indigo-600 transition-colors"
+              >
+                편집
+              </button>
+            </div>
             {hasHierarchy ? (
               <div className="space-y-3">
                 {concepts.map((concept, i) => {
@@ -206,12 +246,35 @@ export default function CardPage() {
                                     <span className="text-[11px] text-slate-400">{sub.description}</span>
                                   )}
                                 </div>
-                                {subInsight?.content && (
-                                  <div className="mt-1 pl-3 flex items-start gap-1">
-                                    <span className="text-indigo-400 text-[10px] mt-0.5 shrink-0">💡</span>
-                                    <p className="text-xs text-indigo-700 leading-relaxed">{subInsight.content}</p>
-                                  </div>
-                                )}
+                                {(() => {
+                                  const insightKey = `${concept.name}::${sub.name}`
+                                  return editingInsightKey === insightKey ? (
+                                    <div className="mt-1.5 pl-3">
+                                      <textarea
+                                        autoFocus
+                                        className="w-full text-xs bg-white border border-indigo-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-300 resize-none min-h-[60px] leading-relaxed"
+                                        value={editingInsightValue}
+                                        onChange={(e) => setEditingInsightValue(e.target.value)}
+                                      />
+                                      <div className="flex gap-2 justify-end mt-1">
+                                        <button onClick={() => setEditingInsightKey(null)} className="text-[11px] text-slate-400 hover:text-slate-600">취소</button>
+                                        <button onClick={() => handleSaveInsight(concept.name, sub.name, editingInsightValue)} className="text-[11px] text-indigo-600 hover:text-indigo-700 font-medium">저장</button>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <div
+                                      className="mt-1 pl-3 flex items-start gap-1 cursor-pointer group/insight"
+                                      onClick={() => { setEditingInsightKey(insightKey); setEditingInsightValue(subInsight?.content || '') }}
+                                    >
+                                      <span className="text-indigo-400 text-[10px] mt-0.5 shrink-0">💡</span>
+                                      {subInsight?.content ? (
+                                        <p className="text-xs text-indigo-700 leading-relaxed group-hover/insight:underline">{subInsight.content}</p>
+                                      ) : (
+                                        <p className="text-xs text-slate-400 group-hover/insight:text-indigo-500">+ Insight 추가</p>
+                                      )}
+                                    </div>
+                                  )
+                                })()}
                               </div>
                             )
                           })}
@@ -277,21 +340,29 @@ export default function CardPage() {
           {connectedCards.length > 0 ? (
             <div className="space-y-2">
               {connectedCards.map((c) => (
-                <Link
-                  key={c.id}
-                  to={`/card/${c.id}`}
-                  className="block bg-slate-50 border border-slate-200 hover:border-indigo-300 rounded-xl px-4 py-3 transition-colors group"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium text-slate-800 group-hover:text-indigo-600 transition-colors">
-                        {c.title}
-                      </p>
-                      <p className="text-xs text-slate-400 mt-0.5">{c.reason}</p>
+                <div key={c.connId} className="relative group">
+                  <Link
+                    to={`/card/${c.id}`}
+                    className="block bg-slate-50 border border-slate-200 hover:border-indigo-300 rounded-xl px-4 py-3 pr-8 transition-colors"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-slate-800 group-hover:text-indigo-600 transition-colors">
+                          {c.title}
+                        </p>
+                        <p className="text-xs text-slate-400 mt-0.5">{c.reason}</p>
+                      </div>
+                      <span className="text-slate-400 group-hover:text-indigo-500 text-sm shrink-0">→</span>
                     </div>
-                    <span className="text-slate-400 group-hover:text-indigo-500 text-sm shrink-0">→</span>
-                  </div>
-                </Link>
+                  </Link>
+                  <button
+                    onClick={() => handleDeleteConnection(c.connId)}
+                    className="absolute top-2.5 right-2.5 text-slate-300 hover:text-red-400 transition-colors text-sm leading-none"
+                    title="연결 삭제"
+                  >
+                    ×
+                  </button>
+                </div>
               ))}
             </div>
           ) : (
@@ -299,6 +370,29 @@ export default function CardPage() {
           )}
         </div>
       </div>
+
+      {/* 추출된 개념 편집 모달 */}
+      {showConceptEditor && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-6">
+          <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[80vh] flex flex-col shadow-xl">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 shrink-0">
+              <h2 className="font-semibold text-slate-800">개념 편집</h2>
+              <button
+                onClick={() => setShowConceptEditor(false)}
+                className="text-slate-400 hover:text-slate-700 text-sm transition-colors"
+              >
+                닫기
+              </button>
+            </div>
+            <div className="overflow-y-auto p-6">
+              <ConceptEditor
+                concepts={concepts}
+                onChange={handleSaveConcepts}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 위험 영역 */}
       <div className="mt-12 pt-8 border-t border-slate-200">

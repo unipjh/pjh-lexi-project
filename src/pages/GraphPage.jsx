@@ -23,6 +23,8 @@ export default function GraphPage() {
   const [graphSize, setGraphSize] = useState({ width: 800, height: 600 })
   const [hoveredCardId, setHoveredCardId] = useState(null)
   const [filterTier, setFilterTier] = useState(null)
+  const [selectedTags, setSelectedTags] = useState(new Set())
+  const [tagFilterOpen, setTagFilterOpen] = useState(false)
 
   const graphContainerRef = useRef(null)
   const fgRef = useRef(null)
@@ -52,9 +54,11 @@ export default function GraphPage() {
     }
   }
 
-  const filteredCards = cards.filter((c) =>
-    c.title.toLowerCase().includes(searchQuery.toLowerCase())
-  )
+  const allTags = [...new Set(cards.flatMap((c) => c.tags || []))]
+
+  const filteredCards = cards
+    .filter((c) => c.title.toLowerCase().includes(searchQuery.toLowerCase()))
+    .filter((c) => selectedTags.size === 0 || (c.tags || []).some((t) => selectedTags.has(t)))
 
   // 카드별 연결 수 맵
   const connCountMap = {}
@@ -185,6 +189,40 @@ export default function GraphPage() {
             ))}
           </div>
         </div>
+
+        {/* 태그 필터 */}
+        {allTags.length > 0 && (
+          <div className="px-4 py-3 border-b border-slate-200">
+            <button
+              onClick={() => setTagFilterOpen((o) => !o)}
+              className="flex items-center justify-between w-full text-[11px] text-slate-400 font-medium"
+            >
+              <span>태그 필터{selectedTags.size > 0 ? ` (${selectedTags.size})` : ''}</span>
+              <span>{tagFilterOpen ? '▲' : '▼'}</span>
+            </button>
+            {tagFilterOpen && (
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {allTags.map((tag) => (
+                  <button
+                    key={tag}
+                    onClick={() => setSelectedTags((prev) => {
+                      const next = new Set(prev)
+                      next.has(tag) ? next.delete(tag) : next.add(tag)
+                      return next
+                    })}
+                    className={`text-[11px] px-2 py-1 rounded-md border transition-colors
+                      ${selectedTags.has(tag)
+                        ? 'border-indigo-300 bg-indigo-50 text-indigo-700'
+                        : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
+                      }`}
+                  >
+                    {tag}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* 카드 목록 */}
         <div className="flex-1 overflow-y-auto p-2">

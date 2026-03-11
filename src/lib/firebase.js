@@ -87,6 +87,10 @@ export async function getConnections(cardId) {
   ]
 }
 
+export async function deleteConnection(connectionId) {
+  await deleteDoc(doc(db, 'connections', connectionId))
+}
+
 export async function getAllConnections() {
   const snapshot = await getDocs(collection(db, 'connections'))
   return snapshot.docs.map((d) => ({ id: d.id, ...d.data() }))

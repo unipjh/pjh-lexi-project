@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { extractConceptsFromPDF, startLearningChat, chatMessage, suggestConnections } from '../lib/gemini'
-import { addCard, getCards, addConnection } from '../lib/firebase'
+import { addCard, getCards, addConnection, updateCard } from '../lib/firebase'
 import ConceptEditor from '../components/ConceptEditor'
-import InsightToggle from '../components/InsightToggle'
+import ConceptPanel, { COLORS } from '../components/ConceptPanel'
 import TagInput from '../components/TagInput'
 import ChatBubble from '../components/ChatBubble'
+import PDFViewer from '../components/PDFViewer'
 
 const MAX_TURNS = 5
 
@@ -198,6 +199,9 @@ export default function UploadPage() {
     if (!savedCardId) return
     setIsSavingConnections(true)
     try {
+      if (cardTags.length > 0) {
+        await updateCard(savedCardId, { tags: cardTags })
+      }
       const selected = connectionSuggestions.filter((s) => selectedConnIds.has(s.card_id))
       await Promise.all(
         selected.map((s) =>
@@ -219,6 +223,23 @@ export default function UploadPage() {
   }
 
   // ── 렌더 ──
+  // extract 단계는 전체 화면 레이아웃이 필요해서 별도 분기
+  if (step === 'extract') {
+    return (
+      <div className="pt-16 pb-4 px-6 h-screen flex flex-col overflow-hidden">
+        <ExtractView
+          file={file} cardTitle={cardTitle} onCardTitleChange={setCardTitle}
+          concepts={extractedConcepts} onConceptsChange={setExtractedConcepts}
+          insights={insights}
+          onInsightChange={setInsightContent}
+          getInsightContent={getInsightContent}
+          onReset={() => { setStep('upload'); setFile(null); setInsights([]) }}
+          onNext={handleStartChat}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="pt-20 pb-16 px-6 max-w-2xl mx-auto">
       {step === 'upload' && (
@@ -229,17 +250,6 @@ export default function UploadPage() {
         />
       )}
       {step === 'extracting' && <ExtractingView fileName={file?.name} />}
-      {step === 'extract' && (
-        <ExtractView
-          file={file} cardTitle={cardTitle} onCardTitleChange={setCardTitle}
-          concepts={extractedConcepts} onConceptsChange={setExtractedConcepts}
-          insights={insights}
-          onInsightChange={setInsightContent}
-          getInsightContent={getInsightContent}
-          onReset={() => { setStep('upload'); setFile(null); setInsights([]) }}
-          onNext={handleStartChat}
-        />
-      )}
       {step === 'chat' && (
         <ChatView
           cardTitle={cardTitle} displayHistory={displayHistory} isThinking={isThinking}
@@ -307,106 +317,125 @@ function ExtractView({
   onReset, onNext,
 }) {
   const [showEditor, setShowEditor] = useState(false)
+  const [activeConceptName, setActiveConceptName] = useState(null)
+
   const hasAnyInsight = insights.some((i) => i.content?.trim())
-  const totalSubConcepts = concepts.reduce((acc, c) => acc + (c.sub_concepts?.length || 0), 0)
+
+  // 개념별 하이라이트 배열 — COLORS index가 ConceptPanel 도트 색과 동기화
+  const highlights = concepts.flatMap((concept, i) => {
+    const color = COLORS[i % COLORS.length]
+    const result = []
+    if (concept.source_text) {
+      result.push({ source_text: concept.source_text, concept_name: concept.name, color })
+    }
+    concept.sub_concepts?.forEach((sub) => {
+      if (sub.source_text) {
+        result.push({ source_text: sub.source_text, concept_name: sub.name, color })
+      }
+    })
+    return result
+  })
 
   return (
-    <div>
-      <div className="mb-6">
-        <button onClick={onReset} className="text-slate-400 hover:text-slate-700 text-sm mb-4 transition-colors">
+    <div className="flex flex-col h-full">
+      {/* 헤더 */}
+      <div className="mb-3 shrink-0">
+        <button
+          onClick={onReset}
+          className="text-slate-400 hover:text-slate-700 text-sm transition-colors"
+        >
           ← 다시 업로드
         </button>
-        <h1 className="text-2xl font-bold text-slate-900">추출된 개념 확인</h1>
-        <p className="text-slate-500 text-sm mt-1">
-          <span className="text-indigo-600 font-medium">{file?.name}</span>에서{' '}
-          {concepts.length}개 상위 개념, {totalSubConcepts}개 하위 개념을 찾았어요.
-        </p>
+        <h1 className="text-xl font-bold text-slate-900 mt-0.5">추출된 개념 확인</h1>
       </div>
 
-      {/* 카드 제목 */}
-      <div className="mb-6">
-        <label className="block text-xs text-slate-500 font-semibold uppercase tracking-wider mb-1.5">카드 제목</label>
-        <input
-          className="w-full bg-white border border-slate-200 text-slate-900 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400 placeholder:text-slate-400"
-          value={cardTitle}
-          onChange={(e) => onCardTitleChange(e.target.value)}
-          placeholder="카드 제목"
-        />
-      </div>
-
-      {/* 개념 + 인사이트 토글 */}
-      <div className="mb-4">
-        <div className="flex items-center justify-between mb-3">
-          <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider">
-            핵심 개념 ({concepts.length}개)
-          </label>
-          <button
-            onClick={() => setShowEditor((v) => !v)}
-            className="text-xs text-slate-400 hover:text-indigo-600 transition-colors"
-          >
-            {showEditor ? '편집 닫기' : '편집'}
-          </button>
+      {/* 60/40 분할 레이아웃 */}
+      <div className="flex gap-4 flex-1 min-h-0">
+        {/* PDFViewer — 60% */}
+        <div className="w-[60%] shrink-0 border border-slate-200 rounded-xl overflow-hidden">
+          <PDFViewer
+            file={file}
+            highlights={highlights}
+            activeConceptName={activeConceptName}
+          />
         </div>
 
-        {showEditor ? (
-          <ConceptEditor concepts={concepts} onChange={onConceptsChange} />
-        ) : (
-          <div className="space-y-3">
-            {concepts.map((concept, i) => (
-              <div key={i} className="border border-slate-200 rounded-xl overflow-hidden">
-                {/* 상위 개념 헤더 */}
-                <div className="px-4 py-2.5 bg-white">
-                  <div className="flex items-baseline gap-2">
-                    <span className="text-sm font-semibold text-slate-800">{concept.name}</span>
-                    {concept.description && (
-                      <span className="text-xs text-slate-400">{concept.description}</span>
-                    )}
-                  </div>
-                </div>
-
-                {/* 하위 개념 + InsightToggle */}
-                {concept.sub_concepts?.length > 0 && (
-                  <div className="border-t border-slate-100 bg-slate-50 divide-y divide-slate-100">
-                    {concept.sub_concepts.map((sub, j) => (
-                      <div key={j} className="px-4 py-2">
-                        <div className="flex items-baseline gap-1.5 mb-0.5">
-                          <span className="text-slate-400 text-[10px]">└</span>
-                          <span className="text-xs font-medium text-slate-700">{sub.name}</span>
-                          {sub.description && (
-                            <span className="text-[11px] text-slate-400">{sub.description}</span>
-                          )}
-                        </div>
-                        <div className="pl-3">
-                          <InsightToggle
-                            conceptName={concept.name}
-                            subConceptName={sub.name}
-                            value={getInsightContent(concept.name, sub.name)}
-                            onChange={(val) => onInsightChange(concept.name, sub.name, val)}
-                          />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
+        {/* 우측 패널 — 40% */}
+        <div className="flex-1 flex flex-col min-h-0 gap-3">
+          {/* 카드 제목 */}
+          <div className="shrink-0">
+            <label className="block text-xs text-slate-500 font-semibold uppercase tracking-wider mb-1.5">
+              카드 제목
+            </label>
+            <input
+              className="w-full bg-white border border-slate-200 text-slate-900 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-400 placeholder:text-slate-400"
+              value={cardTitle}
+              onChange={(e) => onCardTitleChange(e.target.value)}
+              placeholder="카드 제목"
+            />
           </div>
-        )}
+
+          {/* 개념 목록 헤더 */}
+          <div className="flex items-center justify-between shrink-0">
+            <label className="text-xs text-slate-500 font-semibold uppercase tracking-wider">
+              핵심 개념 ({concepts.length}개)
+            </label>
+            <button
+              onClick={() => setShowEditor(true)}
+              className="text-xs text-slate-400 hover:text-indigo-600 transition-colors"
+            >
+              편집
+            </button>
+          </div>
+
+          {/* ConceptPanel — 스크롤 가능 */}
+          <div className="flex-1 overflow-y-auto">
+            <ConceptPanel
+              concepts={concepts}
+              activeConceptName={activeConceptName}
+              onConceptClick={setActiveConceptName}
+              getInsightContent={getInsightContent}
+              onInsightChange={onInsightChange}
+            />
+          </div>
+
+          {/* 하단 버튼 */}
+          <div className="shrink-0 space-y-2">
+            {hasAnyInsight && (
+              <p className="text-xs text-indigo-500">
+                💡 인사이트가 입력됐어요. AI와 대화에서 이 내용을 바탕으로 시작할게요.
+              </p>
+            )}
+            <button
+              onClick={onNext}
+              disabled={concepts.length === 0 || !cardTitle.trim()}
+              className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium py-3 rounded-xl transition-colors"
+            >
+              {hasAnyInsight ? 'AI와 대화 시작 →' : '인사이트 없이 대화 시작 →'}
+            </button>
+          </div>
+        </div>
       </div>
 
-      {hasAnyInsight && (
-        <p className="text-xs text-indigo-500 mb-4">
-          💡 인사이트가 입력됐어요. AI와 대화에서 이 내용을 바탕으로 시작할게요.
-        </p>
+      {/* ConceptEditor 모달 오버레이 */}
+      {showEditor && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-6">
+          <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[80vh] flex flex-col shadow-xl">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 shrink-0">
+              <h2 className="font-semibold text-slate-800">개념 편집</h2>
+              <button
+                onClick={() => setShowEditor(false)}
+                className="text-slate-400 hover:text-slate-700 text-sm transition-colors"
+              >
+                닫기
+              </button>
+            </div>
+            <div className="overflow-y-auto p-6">
+              <ConceptEditor concepts={concepts} onChange={onConceptsChange} />
+            </div>
+          </div>
+        </div>
       )}
-
-      <button
-        onClick={onNext}
-        disabled={concepts.length === 0 || !cardTitle.trim()}
-        className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium py-3 rounded-xl transition-colors"
-      >
-        {hasAnyInsight ? 'AI와 대화 시작 →' : '인사이트 없이 대화 시작 →'}
-      </button>
     </div>
   )
 }
@@ -491,7 +520,6 @@ function ConnectView({
 
   return (
     <div>
-      {/* 저장 완료 */}
       <div className="mb-8">
         <div className="flex items-center gap-3 mb-2">
           <div className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center text-green-600 text-sm">✓</div>
@@ -502,14 +530,12 @@ function ConnectView({
         </p>
       </div>
 
-      {/* 카드 태그 */}
       <div className="mb-8">
         <label className="block text-xs text-slate-500 font-semibold uppercase tracking-wider mb-2">태그</label>
         <TagInput tags={cardTags} onChange={onTagsChange} placeholder="태그 추가 (Enter 또는 ,)" />
         <p className="text-xs text-slate-400 mt-1.5">이 카드를 나중에 찾을 때 쓸 태그를 달아보세요.</p>
       </div>
 
-      {/* 연결 제안 */}
       {suggestions.length > 0 ? (
         <div className="mb-8">
           <p className="text-sm font-semibold text-slate-800 mb-1">연결 제안</p>
